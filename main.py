@@ -1,18 +1,18 @@
 from fastapi import Depends, FastAPI, HTTPException,status
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import JSONResponse
-from fastapi import UploadFile, File, Form
+# from fastapi.responses import JSONResponse
+from fastapi import UploadFile, File, Form, Query
+from sqlalchemy import or_
 from io import BytesIO
-from pathlib import Path
-import shutil
-from fastapi.staticfiles import StaticFiles
 import cloudinary
 import cloudinary.uploader
 import os
-import traceback
+# import traceback
+import json
+from openai import OpenAI
 from datetime import datetime
 from pydantic import EmailStr
-from sqlalchemy.exc import SQLAlchemyError
+# from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from security import hash_password,create_token,get_current_artist
 from security import verify_password,get_current_user,get_current_organizer
@@ -41,30 +41,30 @@ from schemas import (
     applicationsUpdate,
     applicationsResponse
 )
-from fastapi.exceptions import ResponseValidationError
+# from fastapi.exceptions import ResponseValidationError
 
 app=FastAPI()
 
 
-@app.exception_handler(ResponseValidationError)
-async def response_validation_error(request, exc):
-    print("RESPONSE VALIDATION ERRORS:", exc.errors())
-    print("INVALID RESPONSE:", exc.body)
+# @app.exception_handler(ResponseValidationError)
+# async def response_validation_error(request, exc):
+#     print("RESPONSE VALIDATION ERRORS:", exc.errors())
+#     print("INVALID RESPONSE:", exc.body)
 
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": "Response validation failed",
-            "errors": [
-                {
-                    "type": error["type"],
-                    "loc": [str(x) for x in error["loc"]],
-                    "msg": error["msg"]
-                }
-                for error in exc.errors()
-            ]
-        }
-    )
+#     return JSONResponse(
+#         status_code=500,
+#         content={
+#             "detail": "Response validation failed",
+#             "errors": [
+#                 {
+#                     "type": error["type"],
+#                     "loc": [str(x) for x in error["loc"]],
+#                     "msg": error["msg"]
+#                 }
+#                 for error in exc.errors()
+#             ]
+#         }
+#     )
 Base.metadata.create_all(bind=engine)
 # MEDIA_DIR = Path("uploads")
 # MEDIA_DIR.mkdir(parents=True, exist_ok=True)
@@ -81,6 +81,70 @@ cloudinary.config(
     api_secret=os.environ["CLOUDINARY_API_SECRET"],
     secure=True
 )
+def analyze_portfolio_image(image_url: str) -> dict:
+    client = OpenAI(
+        api_key=os.environ["GROQ_API_KEY"],
+        base_url="https://api.groq.com/openai/v1",
+        timeout=20.0,
+        max_retries=1,
+    )
+
+    response = client.chat.completions.create(
+        model=os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b"),
+        temperature=0.2,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You analyze artwork for an artist portfolio. "
+                            "Describe only visible evidence. Do not infer "
+                            "the artist's identity or unsupported facts. "
+                            "Return valid JSON only. "
+                            "Analyze this artwork. Return a JSON object with "
+                            "exactly these fields: "
+                            '"description": a concise visual description, '
+                            '"style": a short artistic style label, '
+                            '"tags": an array of 5 to 10 short searchable tags. '
+                            "Tags should cover visible subjects, medium if "
+                            "reasonably identifiable, colors, techniques, "
+                            "and themes. Do not include hashtags."
+                        )
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url,
+                            "detail": "low"
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("Groq returned an empty vision response")
+
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content
+        content = content.removesuffix("```").strip()
+
+    result = json.loads(content)
+
+    return {
+        "description": str(result.get("description", ""))[:1000],
+        "style": str(result.get("style", ""))[:100],
+        "tags": [
+            str(tag).strip().lower()
+            for tag in result.get("tags", [])
+            if str(tag).strip()
+        ][:10]
+    }
 
 @app.get("/")
 def home():
@@ -281,8 +345,32 @@ def create_organizer_profile( profile_data: organizer_profilesCreate,current_use
 
 
 @app.get("/artist/", response_model=list[artist_publicResponse])
-def artists(db:Session = Depends(get_db)):
-    return db.query(ArtistsProfile).all()
+def artists(
+    search:str|None=None,
+    location:str|None=None,
+    skill:str|None=None,
+    limit:int=Query(default=10,ge=1,le=100),
+    offset:int=Query(default=0,ge=0),
+    db:Session = Depends(get_db)
+):
+    query=db.query(ArtistsProfile)
+
+    if search:
+        query.filter(
+            or_(
+                ArtistsProfile.full_name.ilike(f"%{search}%"),
+                ArtistsProfile.talent_skill.ilike(f"%{search}%")
+            )
+        )
+    if skill:
+        query.filter(ArtistsProfile.talent_skill.ilike(f"%{skill}%"))
+    if location:
+        query.filter(ArtistsProfile.location.ilike(f"%{location}"))
+    return(
+        query.order_by(ArtistsProfile.id).offset(offset).limit(limit).all()
+    )
+
+    
 
 @app.get("/artist/profile", response_model=artist_profilesResponse)
 def artist(
@@ -389,14 +477,32 @@ def create_portfolio_item(
                 status_code=502,
                 detail="Media upload failed"
             )
+        ai_description = None
+        ai_style = None
+        ai_tags = []
 
+        if media_type == "image":
+            try:
+                ai_result = analyze_portfolio_image(media_url)
+
+                ai_description = ai_result["description"]
+                ai_style = ai_result["style"]
+                ai_tags = ai_result["tags"]
+
+            except Exception as exc:
+                # AI failure should not prevent an artist from uploading.
+                print(
+                    f"AI tagging failed: {type(exc).__name__}: {exc}"
+                )
         item = PortfolioItem(
             artist_id=current_artist.id,
             title=title,
             description=description,
             media_url=media_url,
             media_type=media_type,
-            ai_tags=[]
+            ai_tags=ai_tags,
+            ai_description=ai_description,
+            ai_style=ai_style
         )
 
         db.add(item)
@@ -422,13 +528,28 @@ def public_artist(artist_id: int, db: Session = Depends(get_db)):
     return artist
 
 @app.get("/artist/{artist_id}/portfolio", response_model=list[portfolio_itemsResponse])
-def get_public_artist_portfolio(artist_id: int, db: Session = Depends(get_db)):
+def get_public_artist_portfolio(
+    artist_id: int, 
+    media_type:str|None=None,
+    limit:int=Query(default=10,ge=1,le=100),
+    offset:int=Query(default=0,ge=0),
+    db: Session = Depends(get_db)):
     artist = db.query(ArtistsProfile).filter(
         ArtistsProfile.id == artist_id
     ).first()
     if artist is None:
         raise HTTPException(status_code=404, detail="Artist not found")
-    return artist.portfolios
+    query = db.query(PortfolioItem).filter(
+        PortfolioItem.artist_id == artist_id
+    )
+    if media_type:
+        query = query.filter(
+            PortfolioItem.media_type.ilike(f"%{media_type}%")
+        )
+
+    return query.order_by(PortfolioItem.id).limit(limit).offset(offset).all()
+    
+    
 
 @app.get("/portfolio/{portfolio_id}",response_model=portfolio_itemsResponse)
 def get_portfolio_item(portfolio_id: int,db: Session = Depends(get_db)):
@@ -549,7 +670,6 @@ def create_event(title:str=Form(...),
             detail="Unsupported media type"
         )
     max_size=10*1024*1024
-    stage = "reading poster"
 
     try:
         content = event_poster.file.read(max_size + 1)
@@ -559,8 +679,6 @@ def create_event(title:str=Form(...),
                 status_code=413,
                 detail="File exceeds 10MB"
             )
-
-        stage = "uploading poster to Cloudinary"
 
         upload_result = cloudinary.uploader.upload(
             BytesIO(content),
@@ -576,8 +694,6 @@ def create_event(title:str=Form(...),
                 detail="Image upload failed"
             )
 
-        stage = "creating event record"
-
         event = Event(
             organizer_id=current_organizer.id,
             title=title,
@@ -589,15 +705,12 @@ def create_event(title:str=Form(...),
 
         db.add(event)
 
-        stage = "saving event to database"
         db.commit()
         db.refresh(event)
 
         stage = "building response"
         return event
 
-    except HTTPException:
-        raise
 
     except Exception as exc:
         db.rollback()
@@ -611,8 +724,29 @@ def create_event(title:str=Form(...),
         event_poster.file.close()
 
 @app.get("/events",response_model=list[eventsResponse])
-def get_events(db: Session = Depends(get_db)):
-    return db.query(Event).all()
+def get_events(
+    search:str|None=None,
+    status_filter:EventStatus|None=None,
+    min_budget:float|None=None,
+    max_budget:float|None=None,
+    limit:int=Query(default=10,ge=1,le=100),
+    offset:int=Query(default=0,ge=0),
+    db: Session = Depends(get_db)
+):
+    query=db.query(Event)
+
+    if search:
+        query = query.filter(Event.title.ilike(f"%{search}%"))
+    if status_filter:
+        query=query.filter(Event.status.ilike(status_filter))
+    if min_budget:
+        query=query.filter(Event.budget>=min_budget)
+    if max_budget:
+        query=query.filter(Event.budget<=max_budget)
+
+    return(
+        query.order_by(Event.id).offset(offset).limit(limit).all()
+    )
 
 @app.get("/events/{event_id}",response_model=eventsResponse)
 def get_event(event_id: int,db: Session = Depends(get_db)):

@@ -64,6 +64,8 @@ class PortfolioItem(Base):
     description=Column(Text,nullable=True)
     media_url=Column(String,nullable=False)
     media_type=Column(String,nullable=True)
+    ai_description = Column(Text, nullable=True)
+    ai_style = Column(String, nullable=True)
     ai_tags=Column(JSON,nullable=True)
     created_at=Column(DateTime, default=datetime.utcnow)
 

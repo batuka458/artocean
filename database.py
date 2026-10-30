@@ -20,7 +20,6 @@ SessionLocal = sessionmaker(
 
 Base = declarative_base()
 
-
 def get_db():
     with SessionLocal() as db:
         yield db
