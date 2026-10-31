@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 sql_app.db
 .env
+node_modules/
+dist/
+.env.local
+.env.*.local
