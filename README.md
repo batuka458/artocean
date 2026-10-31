@@ -70,7 +70,9 @@ npm run preview
 
 ### Deploy on GitHub Pages
 
-The repository includes `.github/workflows/deploy-pages.yml`. Push to `main`, then enable **Settings → Pages → Source: GitHub Actions**. The workflow builds and publishes `dist/`, and configures the project-site path automatically.
+The repository includes `.github/workflows/deploy-pages.yml`. Before running it, open [the repository's Pages settings](https://github.com/batuka458/artocean-backend/settings/pages) and select **GitHub Actions** under **Build and deployment → Source**. This requires repository administrator access. Then push to `main`, or run **Actions → Deploy frontend to GitHub Pages → Run workflow**. The workflow checks the Pages configuration before building, publishes `dist/`, and configures the project-site path automatically.
+
+If `actions/deploy-pages` reports **Failed to create deployment (status: 404)** even though it found the `github-pages` artifact, check that Pages is enabled with **GitHub Actions** as its source, then rerun the workflow. Uploading an artifact does not enable Pages, and the default `GITHUB_TOKEN` cannot automatically enable it. The Node `punycode` deprecation warning is unrelated to this failure. Once deployed, the project site is available at **https://batuka458.github.io/artocean-backend/**.
 
 GitHub Pages cannot proxy the FastAPI service. To use live account and API data, set `VITE_API_URL` as a repository Actions variable before the build, or deploy the API separately with CORS configured. Without it, the frontend displays its built-in preview collection.
 
