@@ -68,6 +68,12 @@ npm run preview
 
 `dist/` contains the static production frontend. `npm run preview` serves only the built frontend; it does not start or proxy the API. For a complete deployment, serve the frontend and reverse-proxy `/api/*` to FastAPI, stripping `/api`, or set `VITE_API_URL` to your API address **before building**. A cross-origin API needs its own correctly configured CORS policy. Keep secrets on the backend; only environment variables prefixed with `VITE_` are exposed to the browser.
 
+### Deploy on GitHub Pages
+
+The repository includes `.github/workflows/deploy-pages.yml`. Push to `main`, then enable **Settings → Pages → Source: GitHub Actions**. The workflow builds and publishes `dist/`, and configures the project-site path automatically.
+
+GitHub Pages cannot proxy the FastAPI service. To use live account and API data, set `VITE_API_URL` as a repository Actions variable before the build, or deploy the API separately with CORS configured. Without it, the frontend displays its built-in preview collection.
+
 The existing `api/index.py` backend entry point is left unchanged. Choose the appropriate API routing for your deployment platform.
 
 Fonts use Google Fonts with system fallbacks. Preview imagery uses Unsplash; missing images display an intentional placeholder. Sample profile names and metadata are fictional and are not claims about the people pictured.
