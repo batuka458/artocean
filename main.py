@@ -3,7 +3,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 # from fastapi.responses import JSONResponse
 from fastapi import UploadFile, File, Form, Query
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from io import BytesIO
+import re
+from urllib.parse import urlparse
 import cloudinary
 import cloudinary.uploader
 import os
@@ -81,6 +84,108 @@ cloudinary.config(
     api_secret=os.environ["CLOUDINARY_API_SECRET"],
     secure=True
 )
+
+def get_cloudinary_asset_info(media_url: str):
+    path = urlparse(media_url).path
+
+    if "/upload/" not in path:
+        return None
+
+    prefix, asset_path = path.split("/upload/", 1)
+
+    resource_type = prefix.rsplit("/", 1)[-1]
+
+    if resource_type not in {"image", "video", "raw"}:
+        return None
+
+    parts = asset_path.strip("/").split("/")
+
+    # Remove the Cloudinary version component.
+    version_index = next(
+        (
+            i for i, part in enumerate(parts)
+            if re.fullmatch(r"v\d+", part)
+        ),
+        None
+    )
+
+    if version_index is not None:
+        parts = parts[version_index + 1:]
+
+    if not parts:
+        return None
+
+    # Remove the delivery file extension.
+    parts[-1] = parts[-1].rsplit(".", 1)[0]
+
+    public_id = "/".join(parts)
+
+    return public_id, resource_type
+
+
+def delete_cloudinary_media(media_url: str):
+    asset_info = get_cloudinary_asset_info(media_url)
+
+    if not asset_info:
+        print("Could not determine Cloudinary asset information")
+        return
+
+    public_id, resource_type = asset_info
+
+    try:
+        result = cloudinary.uploader.destroy(
+            public_id,
+            resource_type=resource_type,
+            invalidate=True
+        )
+
+        if result.get("result") not in {"ok", "not found"}:
+            print(f"Cloudinary cleanup result: {result}")
+
+    except Exception as exc:
+        print(
+            f"Cloudinary cleanup failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+def validate_media_signature(content: bytes, content_type: str) -> bool:
+    if content_type == "image/jpeg":
+        return content.startswith(b"\xff\xd8\xff")
+
+    if content_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    if content_type == "image/webp":
+        return (
+            len(content) >= 12
+            and content[:4] == b"RIFF"
+            and content[8:12] == b"WEBP"
+        )
+
+    if content_type == "application/pdf":
+        return content.startswith(b"%PDF-")
+
+    if content_type == "video/mp4":
+        return len(content) >= 12 and content[4:8] == b"ftyp"
+
+    if content_type == "audio/wav":
+        return (
+            len(content) >= 12
+            and content[:4] == b"RIFF"
+            and content[8:12] == b"WAVE"
+        )
+
+    if content_type == "audio/mpeg":
+        has_id3 = content.startswith(b"ID3")
+        has_mpeg_frame = any(
+            content[i] == 0xFF and (content[i + 1] & 0xE0) == 0xE0
+            for i in range(min(4, len(content) - 1))
+        )
+        return has_id3 or has_mpeg_frame
+
+    return False
+
+
 def analyze_portfolio_image(image_url: str) -> dict:
     client = OpenAI(
         api_key=os.environ["GROQ_API_KEY"],
@@ -467,7 +572,11 @@ def create_portfolio_item(
                 status_code=413,
                 detail="File exceeds the 10 MB limit"
             )
-
+        if not validate_media_signature(content, media.content_type):
+            raise HTTPException(
+                status_code=415,
+                detail="File content does not match the declared media type"
+            )
         upload_result = cloudinary.uploader.upload(
             BytesIO(content),
             resource_type="auto",
@@ -508,7 +617,27 @@ def create_portfolio_item(
         )
 
         db.add(item)
-        db.commit()
+
+        try:
+            db.commit()
+
+        except Exception as exc:
+            db.rollback()
+
+            print(
+                f"PORTFOLIO DATABASE ERROR: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            # Remove uploaded Cloudinary file if database insert failed.
+            if media_url:
+                delete_cloudinary_media(media_url)
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save portfolio item"
+            ) from exc
+
         db.refresh(item)
 
         return item
@@ -583,7 +712,8 @@ def update_portfolio_item(
         item.description = description
     if ai_tags is not None:
         item.ai_tags = ai_tags
-
+    old_media_url = item.media_url if media is not None else None
+    new_media_url = None
     if media is not None:
         allowed_types = {
             "image/jpeg": "image",
@@ -606,7 +736,11 @@ def update_portfolio_item(
                     status_code=413,
                     detail="File exceeds the 10 MB limit"
                 )
-
+            if not validate_media_signature(content, media.content_type):
+                raise HTTPException(
+                    status_code=415,
+                    detail="File content does not match the declared media type"
+                )
             upload_result = cloudinary.uploader.upload(
                 BytesIO(content),
                 resource_type="auto",
@@ -619,13 +753,61 @@ def update_portfolio_item(
                     detail="Media upload failed"
                 )
 
+            # Start with empty AI metadata.
+            # This prevents old artwork tags from being retained.
+            new_ai_description = None
+            new_ai_style = None
+            new_ai_tags = []
+
+            # Generate fresh metadata only for image uploads.
+            if media_type == "image":
+                try:
+                    ai_result = analyze_portfolio_image(media_url)
+
+                    new_ai_description = ai_result["description"]
+                    new_ai_style = ai_result["style"]
+                    new_ai_tags = ai_result["tags"]
+
+                except Exception as exc:
+                    print(
+                        f"AI retagging failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+                    # Keep the new upload, but don't retain old tags.
+                    new_ai_description = None
+                    new_ai_style = None
+                    new_ai_tags = []
+
+            # Update the database object.
             item.media_url = media_url
             item.media_type = media_type
+            item.ai_description = new_ai_description
+            item.ai_style = new_ai_style
+            item.ai_tags = new_ai_tags
+
         finally:
             media.file.close()
 
-    db.commit()
-    db.refresh(item)
+    try:
+        db.commit()
+        db.refresh(item)
+
+    except Exception as exc:
+        db.rollback()
+
+    # Remove the newly uploaded asset if the database update failed.
+        if new_media_url:
+            delete_cloudinary_media(new_media_url)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update portfolio item"
+        ) from exc
+
+    # Delete the old asset only after successful database commit.
+    if old_media_url and old_media_url != item.media_url:
+        delete_cloudinary_media(old_media_url)
 
     return item
 
@@ -651,8 +833,21 @@ def delete_portfolio_item(
             detail="Not authorized to delete this portfolio item"
         )
 
-    db.delete(item)
-    db.commit()
+    media_url = item.media_url
+
+    try:
+        db.delete(item)
+        db.commit()
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete portfolio item"
+        ) from exc
+
+    # Database deletion succeeded; now clean up Cloudinary.
+    delete_cloudinary_media(media_url)
 
 @app.post("/organizer/events",response_model=eventsResponse,status_code=status.HTTP_201_CREATED)
 def create_event(title:str=Form(...),
@@ -789,13 +984,44 @@ def upd_event(event_id: int, upd_event: eventsUpdate, current_organizer:Organize
     if current_organizer.id!=event.organizer_id:
         raise HTTPException(status_code=403,detail="you can update only your events")
     data=upd_event.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields provided for update"
+        )
+    required_fields = ["title", "description", "status"]
 
-    for key,value in data.items():
-        setattr(event,key,value)
-    db.commit()
-    db.refresh(event)
+    for field in required_fields:
+        if field in data and data[field] is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field} cannot be null"
+            )
 
-    return event
+    if "title" in data:
+        data["title"] = data["title"].strip()
+
+        if not data["title"]:
+            raise HTTPException(
+                status_code=422,
+                detail="Title cannot be empty"
+            )
+
+    try:
+        for key, value in data.items():
+            setattr(event, key, value)
+
+        db.commit()
+        db.refresh(event)
+
+        return event
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update event"
+        )
 
 @app.delete("/events/{event_id}",status_code=status.HTTP_204_NO_CONTENT)
 def del_event(event_id:int,current_organizer:OrganizerProfile=Depends(get_current_organizer),db:Session=Depends(get_db)):
@@ -825,7 +1051,7 @@ def create_application(event_id: int,data: applicationsCreate,current_artist:Art
     existing_application = db.query(Application).filter(Application.event_id == event_id,Application.artist_id == current_artist.id).first()
 
     if existing_application:
-        raise HTTPException(status_code=400,detail="Artist has already applied to this event")
+        raise HTTPException(status_code=409,detail="Artist has already applied to this event")
 
     application = Application(
         event_id=event_id,
@@ -834,7 +1060,16 @@ def create_application(event_id: int,data: applicationsCreate,current_artist:Art
     )
 
     db.add(application)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Artist has already applied to this event"
+        )
+
     db.refresh(application)
 
     return application

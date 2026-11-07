@@ -1,6 +1,6 @@
 from enum import Enum as PyEnum
 from datetime import datetime
-from sqlalchemy import Column,Integer,String,Boolean,Float,DateTime,Enum as SQLEnum,ForeignKey,JSON,Text
+from sqlalchemy import Column,Integer,String,Boolean,Float,DateTime,Enum as SQLEnum,ForeignKey,JSON,Text,UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -88,6 +88,13 @@ class Event(Base):
 
 class Application(Base):
     __tablename__="applications"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "artist_id",
+            name="uq_application_event_artist"
+        ),
+    )
     id=Column(Integer,primary_key=True,index=True)
     event_id=Column(Integer,ForeignKey("events.id"),nullable=False)
     artist_id=Column(Integer,ForeignKey("artistsprofile.id"),nullable=False)
