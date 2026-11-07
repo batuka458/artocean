@@ -10,3 +10,4 @@ httpx
 python-multipart
 cloudinary
 openai
+psycopg[binary]
