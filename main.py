@@ -151,17 +151,18 @@ def home():
     return {"message":"Hello building beckend for artocean"}
 
 
-@app.get("/user/",response_model=list[UserResponse])
-def users(db: Session = Depends(get_db)):
-    return db.query(User).all()
+@app.get("/user/{user_id}", response_model=UserResponse)
+def get_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only view your own account"
+        )
 
-@app.get("/user/{user_id}",response_model=UserResponse)
-def user(user_id:int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    return user
+    return current_user
 
 @app.post("/auth/register", response_model=UserResponse,status_code=status.HTTP_201_CREATED)
 def post_user(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -356,6 +357,7 @@ def artists(
     query=db.query(ArtistsProfile)
 
     if search:
+        search = search.strip()
         query.filter(
             or_(
                 ArtistsProfile.full_name.ilike(f"%{search}%"),
@@ -363,9 +365,9 @@ def artists(
             )
         )
     if skill:
-        query.filter(ArtistsProfile.talent_skill.ilike(f"%{skill}%"))
+        query.filter(ArtistsProfile.talent_skill.ilike(f"%{skill.strip()}%"))
     if location:
-        query.filter(ArtistsProfile.location.ilike(f"%{location}"))
+        query.filter(ArtistsProfile.location.ilike(f"%{location.strip()}"))
     return(
         query.order_by(ArtistsProfile.id).offset(offset).limit(limit).all()
     )

@@ -27,8 +27,8 @@ class User(Base):
     profile_pic_url=Column(String,nullable=True)
     created_at=Column(DateTime, default=datetime.utcnow)
 
-    artist_profile=relationship("ArtistsProfile",back_populates="user",uselist=False)
-    organizer_profile=relationship("OrganizerProfile",back_populates="user",uselist=False)
+    artist_profile=relationship("ArtistsProfile",back_populates="user",uselist=False,cascade="all,delete-orphan",single_parent=True)
+    organizer_profile=relationship("OrganizerProfile",back_populates="user",uselist=False,cascade="all,delete-orphan",single_parent=True)
 
 class ArtistsProfile(Base):
     __tablename__= "artistsprofile"
@@ -42,7 +42,7 @@ class ArtistsProfile(Base):
 
     user=relationship("User",back_populates="artist_profile")
     portfolios=relationship("PortfolioItem",back_populates="artist", cascade="all, delete-orphan")
-    applications= relationship("Application",back_populates="artist")
+    applications= relationship("Application",back_populates="artist",cascade="all,delete-orphan")
 
 class OrganizerProfile(Base):
     __tablename__= "organizerprofile"
