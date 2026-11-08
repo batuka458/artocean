@@ -3,7 +3,22 @@ __pycache__/
 *.pyc
 sql_app.db
 .env
+.env.*
+!.env.example
 node_modules/
 dist/
 .env.local
 .env.*.local
+PROJECT_WALKTHROUGH.md
+# Local database files
+sql_app.db
+sql_app_backup_before_neon_migration.db
+
+# Local migration and diagnostic scripts
+check_sqlite_data.py
+compare_db_schema.py
+migrate_sqlite_to_neon.py
+test_db_connection.py
+
+# Local credentials and notes
+cloudinery.txt
