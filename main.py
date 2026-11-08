@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, HTTPException,status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 # from fastapi.responses import JSONResponse
 from fastapi import UploadFile, File, Form, Query
@@ -12,6 +12,7 @@ import cloudinary.uploader
 import os
 # import traceback
 import json
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from datetime import datetime
 from pydantic import EmailStr
@@ -47,6 +48,15 @@ from schemas import (
 # from fastapi.exceptions import ResponseValidationError
 
 app=FastAPI()
+
+
+@app.middleware("http")
+async def strip_api_prefix(request: Request, call_next):
+    path = request.scope["path"]
+    if path == "/api" or path.startswith("/api/"):
+        request.scope["path"] = path[4:] or "/"
+        request.scope["raw_path"] = request.scope["path"].encode("ascii")
+    return await call_next(request)
 
 
 # @app.exception_handler(ResponseValidationError)
@@ -250,10 +260,6 @@ def analyze_portfolio_image(image_url: str) -> dict:
             if str(tag).strip()
         ][:10]
     }
-
-@app.get("/")
-def home():
-    return {"message":"Hello building beckend for artocean"}
 
 
 @app.get("/user/{user_id}", response_model=UserResponse)
@@ -472,7 +478,7 @@ def artists(
     if skill:
         query.filter(ArtistsProfile.talent_skill.ilike(f"%{skill.strip()}%"))
     if location:
-        query.filter(ArtistsProfile.location.ilike(f"%{location.strip()}"))
+        query.filter(ArtistsProfile.location.ilike(f"%{location.strip()}%"))
     return(
         query.order_by(ArtistsProfile.id).offset(offset).limit(limit).all()
     )
@@ -1171,3 +1177,10 @@ def get_me(
     current_user:User=Depends(get_current_user)
 ):
     return current_user
+
+# Serve the Vite React frontend
+app.mount(
+    "/",
+    StaticFiles(directory="dist", html=True),
+    name="frontend"
+)
